@@ -21,15 +21,17 @@ static int __init initialize(void) {
     }
     else {
         err = alloc_chrdev_region(&dev_number, 0, DEVICE_COUNT, DEVICE_NAME);
-        static_major_device_num = MAJOR(dev_number);
-        static_minor_device_num = MINOR(dev_number);
+        
     }
 
     if (err < 0) {
-        printk(KERN_ALERT "device number acquisation failed!");
+        printk(KERN_ALERT "Device number acquisition failed (err=%d)\n", err);
         return err;
     }
 
+    static_major_device_num = MAJOR(dev_number);
+    static_minor_device_num = MINOR(dev_number);
+    printk(KERN_INFO "Device registered: Major=%d, Minor=%d\n", static_major_device_num, static_minor_device_num);
 
 
     return 0;
