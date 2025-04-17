@@ -2,6 +2,7 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/cdev.h>
+#include <linux/kernel.h>
 
 #define DEVICE_NAME "chardriver"
 #define DEVICE_COUNT 1
@@ -19,8 +20,19 @@ static int static_minor_device_num = 0;
 module_param(static_major_device_num, int, S_IRUGO);
 module_param(static_minor_device_num, int, S_IRUGO);
 
+
+int device_open(struct inode * inode, struct file * filp) {
+    struct char_device* device;
+    device = container_of(inode->i_cdev , struct char_device, cdev);
+
+    filp->private_data = device;
+
+    return 0;
+}
+
 static struct file_operations fops = {
     .owner = THIS_MODULE,
+    .open = device_open,
 };
 
 static int setup_char_device(struct char_device* dev) {
