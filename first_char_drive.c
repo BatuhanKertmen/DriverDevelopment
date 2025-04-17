@@ -6,14 +6,14 @@
 #include <linux/slab.h>
 
 #define DEVICE_NAME "chardriver"
-#define DEVICE_COUNT 1
+#define DEVICE_COUNT 3
 
 static int quantum_size = 4000;
 static int quantum_per_set = 1000;
 module_param(quantum_size, int, S_IRUGO);
 module_param(quantum_per_set, int, S_IRUGO);
 
-typedef quantum char*;
+typedef char* quantum;
 
 struct qset {
     struct qset * next;
@@ -100,6 +100,9 @@ static struct file_operations fops = {
 };
 
 static int setup_char_device(struct char_device* dev, int index) {
+    dev->qset = NULL;
+    dev->size = 0;
+
     int err, devno = MKDEV(major_device_num, minor_device_num + index);
     
     cdev_init(&dev->cdev, &fops);
@@ -118,8 +121,8 @@ static int setup_char_device(struct char_device* dev, int index) {
 
 static int __init initialize(void) {
     int err;
-    if (static_major_device_num){
-        dev_number = MKDEV(static_major_device_num, static_minor_device_num);
+    if (major_device_num){
+        dev_number = MKDEV(major_device_num, minor_device_num);
         err = register_chrdev_region(dev_number, DEVICE_COUNT, DEVICE_NAME);
     }
     else {
@@ -138,9 +141,6 @@ static int __init initialize(void) {
 
 
     for (int idx = 0; idx < DEVICE_COUNT; ++idx) {
-        devices[idx].qset = NULL;
-        devices[idx].size = 0;
-
         err = setup_char_device(&devices[idx], idx);
         if (err < 0) {
             return err;
@@ -155,7 +155,7 @@ static void __exit clean(void) {
         cdev_del(&devices[i].cdev);
     }
 
-    unregister_chrdev_region(dev_number, 1);
+    unregister_chrdev_region(dev_number, DEVICE_COUNT);
 }
 
 module_init(initialize);
