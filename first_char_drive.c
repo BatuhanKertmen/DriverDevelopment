@@ -90,13 +90,38 @@ int device_open(struct inode * inode, struct file * filp) {
     return 0;
 }
 
-int device_release(struct inode * inode, struct file * flip) {
+int device_release(struct inode * inode, struct file * filp) {
+    struct char_device * device = filp->private_data;
+
+    if (device == NULL || device->qset == NULL ) {
+        return 0;
+    }
+
+    struct qset * head = device->qset;
+    struct qset *next;
+    while(head) {
+        if (head->data) {
+            for (int i = 0; i < quantum_per_set; ++i) {
+                kfree(head->data[i]);
+            }
+            kfree(head->data);
+        }
+
+        next = head->next;
+        kfree(head);
+        head = next;
+    }
+
+    device->qset = NULL;
+
+    printk(KERN_INFO "Device with minor %d released and memory freed\n", iminor(inode));
     return 0;
 }
 
 static struct file_operations fops = {
     .owner = THIS_MODULE,
     .open = device_open,
+    .release = device_release,
 };
 
 static int setup_char_device(struct char_device* dev, int index) {
