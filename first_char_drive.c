@@ -3,23 +3,69 @@
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 
 #define DEVICE_NAME "chardriver"
 #define DEVICE_COUNT 1
 
+static int quantum_size = 4000;
+static int quantum_per_set = 1000;
+module_param(quantum_size, int, S_IRUGO);
+module_param(quantum_per_set, int, S_IRUGO);
+
+typedef quantum char*;
+
+struct qset {
+    struct qset * next;
+    quantum * data;
+};
+
 struct char_device
 {
     struct cdev cdev;
+    struct qset * qset;
+    size_t size;
 };
 
-static struct char_device device;
+static struct char_device devices[DEVICE_COUNT];
 static dev_t dev_number;
 
-static int static_major_device_num = 0;
-static int static_minor_device_num = 0;
-module_param(static_major_device_num, int, S_IRUGO);
-module_param(static_minor_device_num, int, S_IRUGO);
+static int major_device_num = 0;
+static int minor_device_num = 0;
+module_param(major_device_num, int, S_IRUGO);
+module_param(minor_device_num, int, S_IRUGO);
 
+int init_qset(struct qset * qset, int quantum_per_set, int quantum_size){
+    if (qset == NULL) {
+        return -EINVAL;
+    }
+
+    if (qset->data != NULL) {
+        return 0;
+    }
+
+    qset->data = kmalloc_array(quantum_per_set, sizeof(quantum), GFP_KERNEL);
+    if (qset->data == NULL) {
+        return -ENOMEM;
+    }
+
+    
+    for (int idx = 0; idx < quantum_per_set; ++idx) {
+        qset->data[idx] = kmalloc(sizeof(char) * quantum_size, GFP_KERNEL);
+        if (qset->data[idx] == NULL) {
+            while (idx--)
+            {
+                kfree(qset->data[idx]);
+            }
+            
+            kfree(qset->data);
+            qset->data = NULL;  
+            return -ENOMEM;
+        }
+    }
+
+    return 0;
+}
 
 int device_open(struct inode * inode, struct file * filp) {
     struct char_device* device;
@@ -27,6 +73,24 @@ int device_open(struct inode * inode, struct file * filp) {
 
     filp->private_data = device;
 
+    struct qset *qs = kmalloc(sizeof(*qs), GFP_KERNEL);
+    if (!qs) {
+        return -ENOMEM;
+    }
+    memset(qs, 0, sizeof(*qs));
+
+    if (init_qset(qs, quantum_per_set, quantum_size) < 0) {
+        printk(KERN_ERR "Failed to init qset\n");
+        kfree(qs);
+        return -ENOMEM;
+    }
+
+    printk(KERN_INFO "Device with minor %d opened\n", iminor(inode));
+    device->qset = qs;
+    return 0;
+}
+
+int device_release(struct inode * inode, struct file * flip) {
     return 0;
 }
 
@@ -35,15 +99,18 @@ static struct file_operations fops = {
     .open = device_open,
 };
 
-static int setup_char_device(struct char_device* dev) {
+static int setup_char_device(struct char_device* dev, int index) {
+    int err, devno = MKDEV(major_device_num, minor_device_num + index);
+    
     cdev_init(&dev->cdev, &fops);
     dev->cdev.owner = THIS_MODULE;
 
-    int err = cdev_add(&dev->cdev, dev_number, DEVICE_COUNT);
+    err = cdev_add(&dev->cdev, devno, 1);
     if (err < 0) {
-        printk(KERN_ALERT "cdev add failed");
+        printk(KERN_ERR "cdev add failed (err=%d)\n", err);
         return err;
     }
+
     printk(KERN_INFO "cdev initialized");
     return 0;
 }
@@ -65,20 +132,29 @@ static int __init initialize(void) {
         return err;
     }
 
-    static_major_device_num = MAJOR(dev_number);
-    static_minor_device_num = MINOR(dev_number);
-    printk(KERN_INFO "Device registered: Major=%d, Minor=%d\n", static_major_device_num, static_minor_device_num);
+    major_device_num = MAJOR(dev_number);
+    minor_device_num = MINOR(dev_number);
+    printk(KERN_INFO "Device registered: Major=%d, Minor=%d\n", major_device_num, minor_device_num);
 
-    err = setup_char_device(&device);
-    if (err < 0) {
-        return err;
+
+    for (int idx = 0; idx < DEVICE_COUNT; ++idx) {
+        devices[idx].qset = NULL;
+        devices[idx].size = 0;
+
+        err = setup_char_device(&devices[idx], idx);
+        if (err < 0) {
+            return err;
+        }    
     }
 
     return 0;
 }
 
 static void __exit clean(void) {
-    cdev_del(&device.cdev);
+    for (int i = 0; i < DEVICE_COUNT; i++) {
+        cdev_del(&devices[i].cdev);
+    }
+
     unregister_chrdev_region(dev_number, 1);
 }
 
