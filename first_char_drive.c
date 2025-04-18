@@ -36,23 +36,22 @@ static int minor_device_num = 0;
 module_param(major_device_num, int, S_IRUGO);
 module_param(minor_device_num, int, S_IRUGO);
 
-int init_qset(struct qset * qset, int quantum_per_set, int quantum_size){
-    if (qset == NULL) {
-        return -EINVAL;
+struct qset* init_qset(int quantum_per_set, int quantum_size){
+    struct qset *qset = kmalloc(sizeof(struct qset), GFP_KERNEL);
+    if (!qset) {
+        return NULL;
     }
-
-    if (qset->data != NULL) {
-        return 0;
-    }
+    memset(qset, 0, sizeof(struct qset));
 
     qset->data = kmalloc_array(quantum_per_set, sizeof(quantum), GFP_KERNEL);
     if (qset->data == NULL) {
-        return -ENOMEM;
+        kfree(qset0);
+        return NULL;
     }
 
     
     for (int idx = 0; idx < quantum_per_set; ++idx) {
-        qset->data[idx] = kmalloc(sizeof(char) * quantum_size, GFP_KERNEL);
+        qset->data[idx] = kzalloc(quantum_size, GFP_KERNEL);
         if (qset->data[idx] == NULL) {
             while (idx--)
             {
@@ -60,12 +59,15 @@ int init_qset(struct qset * qset, int quantum_per_set, int quantum_size){
             }
             
             kfree(qset->data);
+            kfree(qset);
             qset->data = NULL;  
             return -ENOMEM;
         }
     }
 
-    return 0;
+    printk(KERN_INFO "Allocated qset with %d quantums of size %d\n", quantum_per_set, quantum_size);
+
+    return qset;
 }
 
 int device_open(struct inode * inode, struct file * filp) {
@@ -73,21 +75,8 @@ int device_open(struct inode * inode, struct file * filp) {
     device = container_of(inode->i_cdev , struct char_device, cdev);
 
     filp->private_data = device;
-
-    struct qset *qs = kmalloc(sizeof(*qs), GFP_KERNEL);
-    if (!qs) {
-        return -ENOMEM;
-    }
-    memset(qs, 0, sizeof(*qs));
-
-    if (init_qset(qs, quantum_per_set, quantum_size) < 0) {
-        printk(KERN_ERR "Failed to init qset\n");
-        kfree(qs);
-        return -ENOMEM;
-    }
-
+    
     printk(KERN_INFO "Device with minor %d opened\n", iminor(inode));
-    device->qset = qs;
     return 0;
 }
 
@@ -114,15 +103,56 @@ ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff
     
     
     int to_copy = count < available ? count : available;
-    *offset += to_copy;
     if (copy_to_user(buffer, cur->data[quantum_idx] + quantum_offset, to_copy)) {
         return -EFAULT;
     }
+    *offset += to_copy;
     
     return to_copy;
 }
 
-// ssize_t device_write(struct file * filp, const char __user * buffer, size_t count, loff_t * offset) {}
+ssize_t device_write(struct file * filp, const char __user * buffer, size_t count, loff_t * offset) {
+    struct char_device * device = filp->private_data;
+
+    int qset_idx = *offset / (quantum_per_set * quantum_size);
+    struct qset * cur = device->qset;
+
+    if (!device->qset) {
+        device->qset = init_qset(quantum_per_set, quantum_size);
+        if (!device->qset) {
+            return -ENOMEM;
+        }
+
+        cur = device->qset;
+    }
+
+    for (int current_qset_idx = 1; current_qset_idx < qset_idx; ++current_qset_idx) {
+        if (cur->next == NULL) {
+            cur->next = init_qset(quantum_per_set, quantum_size);
+            if (cur->next == NULL) {
+                return -ENOMEM;
+            }
+        }
+
+        cur = cur->next;
+    }
+
+    int quantum_idx = (*offset - (qset_idx * quantum_per_set * quantum_size)) / quantum_size;
+    int quantum_offset = (*offset - (qset_idx * quantum_per_set * quantum_size)) % quantum_size;
+    int available = quantum_size - quantum_offset;
+
+    int to_copy = count < available ? count : available;
+    if (copy_from_user(cur->data[quantum_idx] + quantum_offset, buffer, to_copy)) {
+        return -EFAULT;
+    }
+   
+    if (*offset + to_copy > device->size) {
+        device->size = *offset + to_copy;
+    }
+    *offset += to_copy;
+
+    return to_copy;
+}
 
 int device_release(struct inode * inode, struct file * filp) {
     struct char_device * device = filp->private_data;
