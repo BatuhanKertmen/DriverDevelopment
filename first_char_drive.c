@@ -187,6 +187,7 @@ static struct file_operations fops = {
     .open = device_open,
     .release = device_release,
     .read = device_read,
+    .write = device_write,
 };
 
 static int setup_char_device(struct char_device* dev, int index) {
