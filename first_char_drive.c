@@ -4,6 +4,7 @@
 #include <linux/cdev.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <asm/uaccess.h>
 
 #define DEVICE_NAME "chardriver"
 #define DEVICE_COUNT 3
@@ -90,6 +91,39 @@ int device_open(struct inode * inode, struct file * filp) {
     return 0;
 }
 
+ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff_t * offset) {
+    struct char_device * device = filp->private_data;
+
+    if (*offset >= device->size) {
+        return 0;
+    }
+
+    int qset_idx = *offset / (quantum_per_set * quantum_size);
+    struct qset * cur = device->qset;
+    for (int current_qset_idx = 0; current_qset_idx < qset_idx; ++current_qset_idx) {
+        cur = cur->next;
+    }
+
+    int quantum_idx = (*offset - (qset_idx * quantum_per_set * quantum_size)) / quantum_size;
+    int quantum_offset = (*offset - (qset_idx * quantum_per_set * quantum_size)) % quantum_size;
+    int available = quantum_size - quantum_offset;
+
+    if (!cur->data || !cur->data[quantum_idx]) {
+        return 0;
+    }
+    
+    
+    int to_copy = count < available ? count : available;
+    *offset += to_copy;
+    if (copy_to_user(buffer, cur->data[quantum_idx] + quantum_offset, to_copy)) {
+        return -EFAULT;
+    }
+    
+    return to_copy;
+}
+
+// ssize_t device_write(struct file * filp, const char __user * buffer, size_t count, loff_t * offset) {}
+
 int device_release(struct inode * inode, struct file * filp) {
     struct char_device * device = filp->private_data;
 
@@ -122,6 +156,7 @@ static struct file_operations fops = {
     .owner = THIS_MODULE,
     .open = device_open,
     .release = device_release,
+    .read = device_read,
 };
 
 static int setup_char_device(struct char_device* dev, int index) {
@@ -188,4 +223,4 @@ module_exit(clean);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("BATUHAN");
-MODULE_DESCRIPTION("First Char Drive");
+MODULE_DESCRIPTION("First Char Drive - scull alike");
