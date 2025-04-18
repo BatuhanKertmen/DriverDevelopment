@@ -1,3 +1,19 @@
+#undef CDEBUG /* undef it, just in case */
+#ifdef CHAR_DEBUG
+    #ifdef __KERNEL__
+        /* This one if debugging is on, and kernel space */
+        #define CDEBUG(fmt, ...) printk( KERN_INFO "char_device: %s:%d " fmt, __FILE__, __LINE__, ##__VA_ARGS__)
+    # else
+        /* This one for user space */
+        # define CDEBUG(fmt, ...) fprintf(stderr, fmt,  ##__VA_ARGS__)
+    # endif
+#else
+    # define CDEBUG(fmt, ...) /* not debugging: nothing */
+#endif
+
+#undef CDEBUGG
+#define CDEBUGG(fmt, ...) /* nothing: it's a placeholder */
+
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/fs.h>
@@ -8,6 +24,7 @@
 
 #define DEVICE_NAME "chardriver"
 #define DEVICE_COUNT 3
+
 
 static int quantum_size = 4000;
 static int quantum_per_set = 1000;
@@ -28,7 +45,15 @@ struct char_device
     size_t size;
 };
 
+int device_open(struct inode * inode, struct file * filp);
+int device_release(struct inode *inode, struct file *filp);
+ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff_t * offset);
+ssize_t device_write(struct file * filp, const char __user * buffer, size_t count, loff_t * offset);
+int free_all_memory(struct char_device * device);
+struct qset* init_qset(int quantum_per_set, int quantum_size);
+
 static struct char_device devices[DEVICE_COUNT];
+
 static dev_t dev_number;
 
 static int major_device_num = 0;
@@ -65,7 +90,7 @@ struct qset* init_qset(int quantum_per_set, int quantum_size){
         }
     }
 
-    printk(KERN_INFO "Allocated qset with %d quantums of size %d\n", quantum_per_set, quantum_size);
+    CDEBUG("Allocated qset with %d quantums of size %d\n", quantum_per_set, quantum_size);
 
     return qset;
 }
@@ -75,13 +100,13 @@ int device_open(struct inode * inode, struct file * filp) {
     device = container_of(inode->i_cdev , struct char_device, cdev);
 
     filp->private_data = device;
-    
-    printk(KERN_INFO "Device with minor %d opened\n", iminor(inode));
+
+    CDEBUG("Device with minor %d opened\n", iminor(inode));
     return 0;
 }
 
 int device_release(struct inode *inode, struct file *filp) {
-    printk(KERN_INFO "Device with minor %d released\n", iminor(inode));
+    CDEBUG("Device with minor %d released\n", iminor(inode));
     return 0;
 }
 
@@ -92,11 +117,11 @@ ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff
     loff_t qset_bytes = (loff_t)quantum_per_set * quantum_size;
 
     if (*offset >= device->size) {
-        printk(KERN_INFO "eof reached");
+        CDEBUG("eof reached");
         return 0;
     }
 
-    printk(KERN_INFO "starting");
+    CDEBUG("starting");
 
     int qset_idx = pos / qset_bytes;
     struct qset * cur = device->qset;
@@ -104,7 +129,7 @@ ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff
         cur = cur->next;
     }
 
-    printk(KERN_INFO "current qset index %d", qset_idx);
+    CDEBUG("current qset index %d", qset_idx);
 
     size_t quantum_idx = (pos % qset_bytes) / quantum_size;
     size_t quantum_offset = (pos % qset_bytes) % quantum_size;
@@ -116,7 +141,7 @@ ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff
     
     int available = quantum_size - quantum_offset;
 
-    printk(KERN_INFO "trying to read %dth quantum with %d offset", quantum_idx, quantum_offset);
+    CDEBUG("trying to read %zu th quantum with %zu offset", quantum_idx, quantum_offset);
 
     if (!cur->data || !cur->data[quantum_idx]) {
         return 0;
@@ -124,14 +149,14 @@ ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff
     
     int to_copy = count < available ? count : available;
     
-    printk(KERN_INFO "copying %d bytes", to_copy);
+    CDEBUG("copying %d bytes", to_copy);
     
     if (copy_to_user(buffer, cur->data[quantum_idx] + quantum_offset, to_copy)) {
         return -EFAULT;
     }
     *offset += to_copy;
     
-    printk(KERN_INFO "success");
+    CDEBUG("success");
 
     return to_copy;
 }
@@ -145,7 +170,7 @@ ssize_t device_write(struct file * filp, const char __user * buffer, size_t coun
     int qset_idx = pos / qset_bytes;
     struct qset * cur = device->qset;
 
-    printk(KERN_INFO "current qset index is %d", qset_idx);
+    CDEBUG("current qset index is %d", qset_idx);
 
     if (!device->qset) {
         device->qset = init_qset(quantum_per_set, quantum_size);
@@ -168,7 +193,7 @@ ssize_t device_write(struct file * filp, const char __user * buffer, size_t coun
         cur = cur->next;
     }
 
-    printk(KERN_INFO "accessed correct qset");
+    CDEBUG("accessed correct qset");
 
     size_t quantum_idx = (pos % qset_bytes) / quantum_size;
     size_t quantum_offset = (pos % qset_bytes) % quantum_size;
@@ -181,48 +206,22 @@ ssize_t device_write(struct file * filp, const char __user * buffer, size_t coun
     int available = quantum_size - quantum_offset;
     int to_copy = count < available ? count : available;
 
-    printk(KERN_INFO "trying to access %d indexed quantum %d offset", quantum_idx, quantum_offset);
+    CDEBUG("trying to access %d indexed quantum %d offset", quantum_idx, quantum_offset);
 
     if (copy_from_user(cur->data[quantum_idx] + quantum_offset, buffer, to_copy)) {
         return -EFAULT;
     }
 
-    printk(KERN_INFO "wrote %d bytes", to_copy);
+    CDEBUG("wrote %d bytes", to_copy);
    
     if (pos + to_copy > device->size) {
         device->size = pos + to_copy;
     }
     *offset += to_copy;
 
-    printk(KERN_INFO "offset is updated to %lld", *offset);
+    CDEBUG("offset is updated to %lld", *offset);
 
     return to_copy;
-}
-
-int free_all_memory(struct char_device * device) {
-    if (device == NULL || device->qset == NULL ) {
-        return 0;
-    }
-
-    struct qset * head = device->qset;
-    struct qset *next;
-    while(head) {
-        if (head->data) {
-            for (int i = 0; i < quantum_per_set; ++i) {
-                kfree(head->data[i]);
-            }
-            kfree(head->data);
-        }
-
-        next = head->next;
-        kfree(head);
-        head = next;
-    }
-
-    device->qset = NULL;
-
-    printk(KERN_INFO "Device released and memory freed\n");
-    return 0;
 }
 
 static struct file_operations fops = {
@@ -248,10 +247,37 @@ static int setup_char_device(struct char_device* dev, int index) {
         return err;
     }
 
-    printk(KERN_INFO "cdev initialized");
+    CDEBUG("cdev initialized");
+
     return 0;
 }
 
+int free_all_memory(struct char_device * device) {
+    if (device == NULL || device->qset == NULL ) {
+        return 0;
+    }
+
+    struct qset * head = device->qset;
+    struct qset *next;
+    while(head) {
+        if (head->data) {
+            for (int i = 0; i < quantum_per_set; ++i) {
+                kfree(head->data[i]);
+            }
+            kfree(head->data);
+        }
+
+        next = head->next;
+        kfree(head);
+        head = next;
+    }
+
+    device->qset = NULL;
+
+    CDEBUG("Device released and memory freed\n");
+
+    return 0;
+}
 
 static int __init initialize(void) {
     int err;
@@ -265,14 +291,13 @@ static int __init initialize(void) {
     }
 
     if (err < 0) {
-        printk(KERN_ALERT "Device number acquisition failed (err=%d)\n", err);
+        printk(KERN_ERR "Device number acquisition failed (err=%d)\n", err);
         return err;
     }
 
     major_device_num = MAJOR(dev_number);
     minor_device_num = MINOR(dev_number);
-    printk(KERN_INFO "Device registered: Major=%d, Minor=%d\n", major_device_num, minor_device_num);
-
+    CDEBUG("Device registered: Major=%d, Minor=%d\n", major_device_num, minor_device_num);
 
     for (int idx = 0; idx < DEVICE_COUNT; ++idx) {
         err = setup_char_device(&devices[idx], idx);
@@ -285,8 +310,6 @@ static int __init initialize(void) {
 }
 
 static void __exit clean(void) {
-    
-
     for (int i = 0; i < DEVICE_COUNT; i++) {
         free_all_memory(&devices[i]);
         cdev_del(&devices[i].cdev);
