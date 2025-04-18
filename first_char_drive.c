@@ -206,7 +206,7 @@ ssize_t device_write(struct file * filp, const char __user * buffer, size_t coun
     int available = quantum_size - quantum_offset;
     int to_copy = count < available ? count : available;
 
-    CDEBUG("trying to access %d indexed quantum %d offset", quantum_idx, quantum_offset);
+    CDEBUG("trying to access %zu indexed quantum %zu offset", quantum_idx, quantum_offset);
 
     if (copy_from_user(cur->data[quantum_idx] + quantum_offset, buffer, to_copy)) {
         return -EFAULT;
