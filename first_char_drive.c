@@ -88,6 +88,9 @@ int device_release(struct inode *inode, struct file *filp) {
 ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff_t * offset) {
     struct char_device * device = filp->private_data;
 
+    loff_t pos = *offset;
+    loff_t qset_bytes = (loff_t)quantum_per_set * quantum_size;
+
     if (*offset >= device->size) {
         printk(KERN_INFO "eof reached");
         return 0;
@@ -95,7 +98,7 @@ ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff
 
     printk(KERN_INFO "starting");
 
-    int qset_idx = *offset / (quantum_per_set * quantum_size);
+    int qset_idx = pos / qset_bytes;
     struct qset * cur = device->qset;
     for (int current_qset_idx = 0; current_qset_idx < qset_idx; ++current_qset_idx) {
         cur = cur->next;
@@ -103,8 +106,14 @@ ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff
 
     printk(KERN_INFO "current qset index %d", qset_idx);
 
-    int quantum_idx = (*offset - (qset_idx * quantum_per_set * quantum_size)) / quantum_size;
-    int quantum_offset = (*offset - (qset_idx * quantum_per_set * quantum_size)) % quantum_size;
+    size_t quantum_idx = (pos % qset_bytes) / quantum_size;
+    size_t quantum_offset = (pos % qset_bytes) % quantum_size;
+
+    if (quantum_idx >= quantum_per_set) {
+        printk(KERN_ERR "quantum_idx %zu exceeds limit (%d)\n", quantum_idx, quantum_per_set);
+        return -EFAULT;
+    }
+    
     int available = quantum_size - quantum_offset;
 
     printk(KERN_INFO "trying to read %dth quantum with %d offset", quantum_idx, quantum_offset);
@@ -130,18 +139,24 @@ ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff
 ssize_t device_write(struct file * filp, const char __user * buffer, size_t count, loff_t * offset) {
     struct char_device * device = filp->private_data;
 
-    int qset_idx = *offset / (quantum_per_set * quantum_size);
+    loff_t pos = *offset;
+    loff_t qset_bytes = (loff_t)quantum_per_set * quantum_size;
+
+    int qset_idx = pos / qset_bytes;
     struct qset * cur = device->qset;
+
+    printk(KERN_INFO "current qset index is %d", qset_idx);
 
     if (!device->qset) {
         device->qset = init_qset(quantum_per_set, quantum_size);
-        if (!device->qset) {
+        if (device->qset == NULL) {
             return -ENOMEM;
         }
 
         cur = device->qset;
     }
 
+    
     for (int current_qset_idx = 1; current_qset_idx < qset_idx; ++current_qset_idx) {
         if (cur->next == NULL) {
             cur->next = init_qset(quantum_per_set, quantum_size);
@@ -153,19 +168,33 @@ ssize_t device_write(struct file * filp, const char __user * buffer, size_t coun
         cur = cur->next;
     }
 
-    int quantum_idx = (*offset - (qset_idx * quantum_per_set * quantum_size)) / quantum_size;
-    int quantum_offset = (*offset - (qset_idx * quantum_per_set * quantum_size)) % quantum_size;
-    int available = quantum_size - quantum_offset;
+    printk(KERN_INFO "accessed correct qset");
 
+    size_t quantum_idx = (pos % qset_bytes) / quantum_size;
+    size_t quantum_offset = (pos % qset_bytes) % quantum_size;
+
+    if (quantum_idx >= quantum_per_set) {
+        printk(KERN_ERR "quantum_idx %zu exceeds limit (%d)\n", quantum_idx, quantum_per_set);
+        return -EFAULT;
+    }
+
+    int available = quantum_size - quantum_offset;
     int to_copy = count < available ? count : available;
+
+    printk(KERN_INFO "trying to access %d indexed quantum %d offset", quantum_idx, quantum_offset);
+
     if (copy_from_user(cur->data[quantum_idx] + quantum_offset, buffer, to_copy)) {
         return -EFAULT;
     }
+
+    printk(KERN_INFO "wrote %d bytes", to_copy);
    
-    if (*offset + to_copy > device->size) {
-        device->size = *offset + to_copy;
+    if (pos + to_copy > device->size) {
+        device->size = pos + to_copy;
     }
     *offset += to_copy;
+
+    printk(KERN_INFO "offset is updated to %lld", *offset);
 
     return to_copy;
 }
