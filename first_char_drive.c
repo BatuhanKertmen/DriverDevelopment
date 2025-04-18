@@ -45,7 +45,7 @@ struct qset* init_qset(int quantum_per_set, int quantum_size){
 
     qset->data = kmalloc_array(quantum_per_set, sizeof(quantum), GFP_KERNEL);
     if (qset->data == NULL) {
-        kfree(qset0);
+        kfree(qset);
         return NULL;
     }
 
@@ -61,7 +61,7 @@ struct qset* init_qset(int quantum_per_set, int quantum_size){
             kfree(qset->data);
             kfree(qset);
             qset->data = NULL;  
-            return -ENOMEM;
+            return NULL;
         }
     }
 
@@ -80,12 +80,20 @@ int device_open(struct inode * inode, struct file * filp) {
     return 0;
 }
 
+int device_release(struct inode *inode, struct file *filp) {
+    printk(KERN_INFO "Device with minor %d released\n", iminor(inode));
+    return 0;
+}
+
 ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff_t * offset) {
     struct char_device * device = filp->private_data;
 
     if (*offset >= device->size) {
+        printk(KERN_INFO "eof reached");
         return 0;
     }
+
+    printk(KERN_INFO "starting");
 
     int qset_idx = *offset / (quantum_per_set * quantum_size);
     struct qset * cur = device->qset;
@@ -93,21 +101,29 @@ ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff
         cur = cur->next;
     }
 
+    printk(KERN_INFO "current qset index %d", qset_idx);
+
     int quantum_idx = (*offset - (qset_idx * quantum_per_set * quantum_size)) / quantum_size;
     int quantum_offset = (*offset - (qset_idx * quantum_per_set * quantum_size)) % quantum_size;
     int available = quantum_size - quantum_offset;
+
+    printk(KERN_INFO "trying to read %dth quantum with %d offset", quantum_idx, quantum_offset);
 
     if (!cur->data || !cur->data[quantum_idx]) {
         return 0;
     }
     
-    
     int to_copy = count < available ? count : available;
+    
+    printk(KERN_INFO "copying %d bytes", to_copy);
+    
     if (copy_to_user(buffer, cur->data[quantum_idx] + quantum_offset, to_copy)) {
         return -EFAULT;
     }
     *offset += to_copy;
     
+    printk(KERN_INFO "success");
+
     return to_copy;
 }
 
@@ -154,9 +170,7 @@ ssize_t device_write(struct file * filp, const char __user * buffer, size_t coun
     return to_copy;
 }
 
-int device_release(struct inode * inode, struct file * filp) {
-    struct char_device * device = filp->private_data;
-
+int free_all_memory(struct char_device * device) {
     if (device == NULL || device->qset == NULL ) {
         return 0;
     }
@@ -178,7 +192,7 @@ int device_release(struct inode * inode, struct file * filp) {
 
     device->qset = NULL;
 
-    printk(KERN_INFO "Device with minor %d released and memory freed\n", iminor(inode));
+    printk(KERN_INFO "Device released and memory freed\n");
     return 0;
 }
 
@@ -242,7 +256,10 @@ static int __init initialize(void) {
 }
 
 static void __exit clean(void) {
+    
+
     for (int i = 0; i < DEVICE_COUNT; i++) {
+        free_all_memory(&devices[i]);
         cdev_del(&devices[i].cdev);
     }
 
