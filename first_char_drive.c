@@ -20,11 +20,13 @@
 #include <linux/cdev.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/device.h> 
 #include <asm/uaccess.h>
 
 #define DEVICE_NAME "chardriver"
 #define DEVICE_COUNT 3
 
+static struct class *driver_class;
 
 static int quantum_size = 4000;
 static int quantum_per_set = 1000;
@@ -232,12 +234,14 @@ static struct file_operations fops = {
     .write = device_write,
 };
 
-static int setup_char_device(struct char_device* dev, int index) {
+static int setup_char_device(struct char_device* dev, int index, struct class * driver_class) {
     dev->qset = NULL;
     dev->size = 0;
 
     int err, devno = MKDEV(major_device_num, minor_device_num + index);
     
+    device_create(driver_class, NULL, devno, NULL, "chardriver%d", index);
+
     cdev_init(&dev->cdev, &fops);
     dev->cdev.owner = THIS_MODULE;
 
@@ -295,12 +299,18 @@ static int __init initialize(void) {
         return err;
     }
 
+    driver_class = class_create("chardriver_class");
+    if (IS_ERR(driver_class)) {
+        unregister_chrdev_region(dev_number, DEVICE_COUNT);
+        return PTR_ERR(driver_class);
+    }
+
     major_device_num = MAJOR(dev_number);
     minor_device_num = MINOR(dev_number);
     CDEBUG("Device registered: Major=%d, Minor=%d\n", major_device_num, minor_device_num);
 
     for (int idx = 0; idx < DEVICE_COUNT; ++idx) {
-        err = setup_char_device(&devices[idx], idx);
+        err = setup_char_device(&devices[idx], idx, driver_class);
         if (err < 0) {
             return err;
         }    
@@ -313,8 +323,10 @@ static void __exit clean(void) {
     for (int i = 0; i < DEVICE_COUNT; i++) {
         free_all_memory(&devices[i]);
         cdev_del(&devices[i].cdev);
+        device_destroy(driver_class, MKDEV(major_device_num, minor_device_num + i));
     }
 
+    class_destroy(driver_class);
     unregister_chrdev_region(dev_number, DEVICE_COUNT);
 }
 
