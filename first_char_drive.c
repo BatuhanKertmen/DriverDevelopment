@@ -283,6 +283,12 @@ int free_all_memory(struct char_device * device) {
     return 0;
 }
 
+static char *devnode_func(const struct device *dev, umode_t *mode) {
+    if (mode)
+        *mode = 0666;
+    return NULL;
+}
+
 static int __init initialize(void) {
     int err;
     if (major_device_num){
@@ -304,6 +310,7 @@ static int __init initialize(void) {
         unregister_chrdev_region(dev_number, DEVICE_COUNT);
         return PTR_ERR(driver_class);
     }
+    driver_class->devnode = devnode_func;
 
     major_device_num = MAJOR(dev_number);
     minor_device_num = MINOR(dev_number);
