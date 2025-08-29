@@ -1,18 +1,4 @@
-#undef CDEBUG /* undef it, just in case */
-#ifdef CHAR_DEBUG
-    #ifdef __KERNEL__
-        /* This one if debugging is on, and kernel space */
-        #define CDEBUG(fmt, ...) printk( KERN_INFO "char_device: %s:%d " fmt, __FILE__, __LINE__, ##__VA_ARGS__)
-    # else
-        /* This one for user space */
-        # define CDEBUG(fmt, ...) fprintf(stderr, fmt,  ##__VA_ARGS__)
-    # endif
-#else
-    # define CDEBUG(fmt, ...) /* not debugging: nothing */
-#endif
-
-#undef CDEBUGG
-#define CDEBUGG(fmt, ...) /* nothing: it's a placeholder */
+#include "first_char_drive.h"
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -24,9 +10,6 @@
 #include <linux/mutex.h>
 #include <asm/uaccess.h>
 
-#define DEVICE_NAME "chardriver"
-#define DEVICE_COUNT 3
-
 static struct class *driver_class;
 
 static int quantum_size = 4000;
@@ -34,20 +17,6 @@ static int quantum_per_set = 1000;
 module_param(quantum_size, int, S_IRUGO);
 module_param(quantum_per_set, int, S_IRUGO);
 
-typedef char* quantum;
-
-struct qset {
-    struct qset * next;
-    quantum * data;
-};
-
-struct char_device
-{
-    struct cdev cdev;
-    struct qset * qset;
-    size_t size;
-    struct mutex device_mutex;
-};
 
 int device_open(struct inode * inode, struct file * filp);
 int device_release(struct inode *inode, struct file *filp);
@@ -115,21 +84,23 @@ int device_release(struct inode *inode, struct file *filp) {
 }
 
 ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff_t * offset) {
-    if (count == 0) {
-        return 0;
-    }
-    
     struct char_device * device = filp->private_data;
-
+    
     mutex_lock(&device->device_mutex);
+    ssize_t result;
+
+    if (count == 0) {
+        result = 0;
+        goto release_lock;
+    }
 
     loff_t pos = *offset;
     loff_t qset_bytes = (loff_t)quantum_per_set * quantum_size;
 
     if (pos >= device->size) {
-        mutex_unlock(&device->device_mutex);
         CDEBUG("eof reached");
-        return 0;
+        result = 0;
+        goto release_lock;
     }
     size_t remaining = device->size - pos;
     if (count > remaining) {
@@ -140,31 +111,31 @@ ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff
 
     if (device->qset == NULL) {
         CDEBUG("qset head pointer is null!");
-        mutex_unlock(&device->device_mutex);
-        return 0;
+        result = 0;
+        goto release_lock;
     }
 
-    int qset_idx = pos / qset_bytes;
+    size_t qset_idx = pos / qset_bytes;
     struct qset * cur = device->qset;
     for (int current_qset_idx = 0; current_qset_idx < qset_idx; ++current_qset_idx) {
         if(cur == NULL) {
             CDEBUG("null qset when reading idx: %d", current_qset_idx);
-            mutex_unlock(&device->device_mutex);
-            return 0;
+            result = 0;
+            goto release_lock;
         }
         
         cur = cur->next;
     }
 
-    CDEBUG("current qset index %d", qset_idx);
+    CDEBUG("current qset index %zu", qset_idx);
 
     size_t quantum_idx = (pos % qset_bytes) / quantum_size;
     size_t quantum_offset = (pos % qset_bytes) % quantum_size;
 
     if (quantum_idx >= quantum_per_set) {
         printk(KERN_ERR "quantum_idx %zu exceeds limit (%d)\n", quantum_idx, quantum_per_set);
-        mutex_unlock(&device->device_mutex);
-        return -EFAULT;
+        result = -EFAULT;
+        goto release_lock;
     }
     
     size_t available = quantum_size - quantum_offset;
@@ -172,60 +143,65 @@ ssize_t device_read(struct file * filp, char __user * buffer, size_t count, loff
     CDEBUG("trying to read %zu th quantum with %zu offset", quantum_idx, quantum_offset);
 
     if (!cur->data || !cur->data[quantum_idx]) {
-        mutex_unlock(&device->device_mutex);
-        return 0;
+        result = 0;
+        goto release_lock;
     }
     
     size_t to_copy = count < available ? count : available;
     
-    CDEBUG("copying %d bytes", to_copy);
+    CDEBUG("copying %zu bytes", to_copy);
     
 
-    size_t not_copied = copy_to_user(buffer, cur->data[quantum_idx] + quantum_offset, to_copy);
+    unsigned long not_copied = copy_to_user(buffer, cur->data[quantum_idx] + quantum_offset, to_copy);
     size_t copied = to_copy - not_copied;
     *offset += copied;
     
     if (copied == 0 && not_copied) {
-        mutex_unlock(&device->device_mutex);
-        return -EFAULT;
+        result = -EFAULT;
+        goto release_lock;
     }
 
     CDEBUG("success");
 
+    result = copied;
+    goto release_lock;
+
+release_lock:
     mutex_unlock(&device->device_mutex);
-    return copied;
+    return result;
 }
 
 ssize_t device_write(struct file * filp, const char __user * buffer, size_t count, loff_t * offset) {
     struct char_device * device = filp->private_data;
 
     mutex_lock(&device->device_mutex);
+    ssize_t result;
 
     loff_t pos = *offset;
     loff_t qset_bytes = (loff_t)quantum_per_set * quantum_size;
 
-    int qset_idx = pos / qset_bytes;
+    size_t qset_idx = pos / qset_bytes;
     struct qset * cur = device->qset;
 
-    CDEBUG("current qset index is %d", qset_idx);
+    CDEBUG("current qset index is %zu", qset_idx);
 
     if (!device->qset) {
         device->qset = init_qset(quantum_per_set, quantum_size);
-        if (device->qset == NULL) {
-            mutex_unlock(&device->device_mutex);
-            return -ENOMEM;
+        if (device->qset == NULL) { 
+            result = -ENOMEM;
+            goto release_lock;
         }
 
         cur = device->qset;
     }
 
     
-    for (int current_qset_idx = 1; current_qset_idx < qset_idx; ++current_qset_idx) {
+    for (size_t current_qset_idx = 0; current_qset_idx < qset_idx; ++current_qset_idx) {
         if (cur->next == NULL) {
             cur->next = init_qset(quantum_per_set, quantum_size);
             if (cur->next == NULL) {
-                mutex_unlock(&device->device_mutex);
-                return -ENOMEM;
+                result = -ENOMEM;
+                goto release_lock;
             }
         }
 
@@ -238,9 +214,9 @@ ssize_t device_write(struct file * filp, const char __user * buffer, size_t coun
     size_t quantum_offset = (pos % qset_bytes) % quantum_size;
 
     if (quantum_idx >= quantum_per_set) {
-        mutex_unlock(&device->device_mutex);
         printk(KERN_ERR "quantum_idx %zu exceeds limit (%d)\n", quantum_idx, quantum_per_set);
-        return -EFAULT;
+        result = -EFAULT;
+        goto release_lock;
     }
 
     int available = quantum_size - quantum_offset;
@@ -249,8 +225,8 @@ ssize_t device_write(struct file * filp, const char __user * buffer, size_t coun
     CDEBUG("trying to access %zu indexed quantum %zu offset", quantum_idx, quantum_offset);
 
     if (copy_from_user(cur->data[quantum_idx] + quantum_offset, buffer, to_copy)) {
-        mutex_unlock(&device->device_mutex);
-        return -EFAULT;
+        result = -EFAULT;
+        goto release_lock;
     }
 
     CDEBUG("wrote %d bytes", to_copy);
@@ -262,8 +238,12 @@ ssize_t device_write(struct file * filp, const char __user * buffer, size_t coun
 
     CDEBUG("offset is updated to %lld", *offset);
 
+    result = to_copy;
+    goto release_lock;
+
+release_lock:
     mutex_unlock(&device->device_mutex);
-    return to_copy;
+    return result;
 }
 
 static struct file_operations fops = {
@@ -272,6 +252,7 @@ static struct file_operations fops = {
     .release = device_release,
     .read = device_read,
     .write = device_write,
+    .llseek  = default_llseek,
 };
 
 static int setup_char_device(struct char_device* dev, int index, struct class * driver_class) {
