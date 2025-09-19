@@ -1,4 +1,5 @@
 #include "first_char_drive.h"
+#include "first_char_ioctl.h"
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -6,8 +7,9 @@
 #include <linux/cdev.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
-#include <linux/device.h> 
+#include <linux/device.h>
 #include <linux/uaccess.h>
+
 
 static struct class *driver_class;
 
@@ -245,12 +247,29 @@ release_lock:
     return result;
 }
 
+long device_ioctl(struct file* filp, unsigned int cmd, unsigned long arg) {
+    struct char_device* device = filp->private_data;
+
+    if (_IOC_TYPE(CMD) != FCD_IOC_MAGIC) return -ENOTTY;
+    if (_IOC_NR(CMD) > FCD_MAX_NUMBER) return -ENOTTY;
+
+    int err;
+    if (_IOC_DIR(cmd) & _IOC_READ) {
+        err = !access_ok(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
+    } else if (_IOC_DIR(cmd) & IOC_WRITE) {
+        err = !access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
+    }
+    if (err) return -EFAULT;    
+
+}
+
 static const struct file_operations fops = {
     .owner = THIS_MODULE,
     .open = device_open,
     .release = device_release,
     .read = device_read,
     .write = device_write,
+    .unlocked_ioctl = device_ioctl,
     .llseek  = default_llseek,
 };
 
